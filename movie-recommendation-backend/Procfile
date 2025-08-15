@@ -1,1 +1,1 @@
-web: gunicorn prodev_be.wsgi
+web: gunicorn prodev_be.wsgi:application --log-file -
