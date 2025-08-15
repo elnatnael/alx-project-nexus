@@ -30,6 +30,7 @@ django-filter==23.1
 drf-yasg==1.21.7
 django-redis==5.4.0
 setuptools>=65.5.0
+requests==2.31.0
 
 
 
