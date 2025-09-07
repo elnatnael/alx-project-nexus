@@ -1,88 +1,137 @@
-from rest_framework import generics, status
+import json
+from django.core.cache import cache
+from rest_framework import permissions, status
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
-from .recommenders import HybridRecommender
-from movies.serializers import MovieSerializer
-from movies.models import Movie
+from rest_framework.views import APIView
+from drf_yasg.utils import swagger_auto_schema
+from drf_yasg import openapi
 
-class PersonalizedRecommendationsView(generics.GenericAPIView):
-    permission_classes = [IsAuthenticated]
-    serializer_class = MovieSerializer
+from movies.models import UserFavorite
+from movies.serializers import TMDBSerializer
+from movies.tmdb import fetch_recommendations, fetch_movie_details, fetch_trending_movies
 
+
+class UserBasedRecommendationsView(APIView):
+    """
+    Generate recommendations for the logged-in user
+    based on their favorite movies.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    @swagger_auto_schema(
+        operation_description="Get personalized recommendations for the current user",
+        responses={
+            200: openapi.Response("Successful response", TMDBSerializer(many=True)),
+            401: openapi.Response("Unauthorized"),
+            500: openapi.Response("Internal Server Error"),
+        },
+    )
     def get(self, request):
-        n = int(request.query_params.get('n', 10))
-        
-        recommender = HybridRecommender(request.user)
-        recommendations = recommender.get_recommendations(n)
-        
-        # Extract movies from recommendations (which are (movie, score) tuples)
-        movies = [rec[0] for rec in recommendations]
-        
-        serializer = self.get_serializer(movies, many=True)
-        return Response({
-            'results': serializer.data,
-            'algorithm': 'hybrid'
-        })
+        user = request.user
+        cache_key = f"user_recommendations_{user.id}"
+        cached_data = cache.get(cache_key)
+        if cached_data:
+            return Response(cached_data, status=status.HTTP_200_OK)
 
-class TrackInteractionView(generics.CreateAPIView):
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request, *args, **kwargs):
-        movie_id = request.data.get('movie_id')
-        interaction_type = request.data.get('interaction_type')
-        rating = request.data.get('rating', None)
-        
-        if not movie_id or not interaction_type:
+        favorites = UserFavorite.objects.filter(user=user).select_related("movie")
+        if not favorites.exists():
             return Response(
-                {'error': 'movie_id and interaction_type are required'},
-                status=status.HTTP_400_BAD_REQUEST
+                {"message": "No favorites found for this user"},
+                status=status.HTTP_200_OK,
             )
-        
-        try:
-            movie = Movie.objects.get(tmdb_id=movie_id)
-        except Movie.DoesNotExist:
-            # Fetch movie details from TMDb if not in our DB
-            movie_data = fetch_movie_details(movie_id)
-            if not movie_data:
-                return Response(
-                    {'error': 'Movie not found'},
-                    status=status.HTTP_404_NOT_FOUND
-                )
-            
-            # Create movie in our DB
-            movie = Movie.objects.create(
-                tmdb_id=movie_data['id'],
-                title=movie_data['title'],
-                overview=movie_data['overview'],
-                release_date=movie_data['release_date'],
-                poster_path=movie_data['poster_path'],
-                backdrop_path=movie_data['backdrop_path'],
-                popularity=movie_data['popularity'],
-                vote_average=movie_data['vote_average'],
-                vote_count=movie_data['vote_count']
+
+        # For simplicity, pick the first favorite movie and get recommendations
+        first_fav = favorites.first().movie
+        recommendations = fetch_recommendations(first_fav.tmdb_id)
+
+        if recommendations is None:
+            return Response(
+                {"error": "Failed to fetch recommendations"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
-            
-            # Add genres
-            for genre_data in movie_data.get('genres', []):
-                genre, _ = Genre.objects.get_or_create(
-                    tmdb_id=genre_data['id'],
-                    defaults={'name': genre_data['name']}
-                )
-                movie.genres.add(genre)
-        
-        # Create or update interaction
-        interaction, created = UserInteraction.objects.get_or_create(
-            user=request.user,
-            movie=movie,
-            interaction_type=interaction_type,
-            defaults={'rating': rating}
-        )
-        
-        if not created and rating is not None:
-            interaction.rating = rating
-            interaction.save()
-        
-        return Response(
-            {'status': 'success', 'interaction_id': interaction.id},
-            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK
-        )
+
+        serializer = TMDBSerializer(data=recommendations, many=True)
+        if serializer.is_valid():
+            cache.set(cache_key, serializer.data, timeout=21600)  # 6 hours
+            return Response(serializer.data, status=status.HTTP_200_OK)
+
+        return Response(serializer.errors, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class MovieBasedRecommendationsView(APIView):
+    """
+    Generate recommendations based on a given movie ID.
+    Public endpoint (no auth required).
+    """
+    permission_classes = [permissions.AllowAny]
+
+    @swagger_auto_schema(
+        operation_description="Get recommendations for a specific movie",
+        responses={
+            200: openapi.Response("Successful response", TMDBSerializer(many=True)),
+            404: openapi.Response("Movie not found"),
+            500: openapi.Response("Internal Server Error"),
+        },
+    )
+    def get(self, request, movie_id):
+        cache_key = f"movie_recommendations_{movie_id}"
+        cached_data = cache.get(cache_key)
+        if cached_data:
+            return Response(cached_data, status=status.HTTP_200_OK)
+
+        # Ensure movie exists
+        movie = fetch_movie_details(movie_id)
+        if movie is None:
+            return Response(
+                {"error": "Movie not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        recommendations = fetch_recommendations(movie_id)
+        if recommendations is None:
+            return Response(
+                {"error": "Failed to fetch recommendations"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        serializer = TMDBSerializer(data=recommendations, many=True)
+        if serializer.is_valid():
+            cache.set(cache_key, serializer.data, timeout=21600)  # 6 hours
+            return Response(serializer.data, status=status.HTTP_200_OK)
+
+        return Response(serializer.errors, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class TrendingRecommendationsView(APIView):
+    """
+    Fetch trending movies as a form of recommendations.
+    Public endpoint (no auth required).
+    """
+    permission_classes = [permissions.AllowAny]
+
+    @swagger_auto_schema(
+        operation_description="Get trending movies (as recommendations)",
+        responses={
+            200: openapi.Response("Successful response", TMDBSerializer(many=True)),
+            500: openapi.Response("Internal Server Error"),
+        },
+    )
+    def get(self, request):
+        cache_key = "trending_recommendations"
+        cached_data = cache.get(cache_key)
+        if cached_data:
+            return Response(cached_data, status=status.HTTP_200_OK)
+
+        trending = fetch_trending_movies(time_window="week")
+        if trending is None:
+            return Response(
+                {"error": "Failed to fetch trending movies"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        serializer = TMDBSerializer(data=trending, many=True)
+        if serializer.is_valid():
+            cache.set(cache_key, serializer.data, timeout=21600)  # 6 hours
+            return Response(serializer.data, status=status.HTTP_200_OK)
+
+        return Response(serializer.errors, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

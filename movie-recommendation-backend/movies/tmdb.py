@@ -34,3 +34,19 @@ def search_movies(query):
     if response.status_code == 200:
         return response.json().get('results', [])
     return None
+def fetch_top_rated():
+    url = f"{BASE_URL}/movie/top_rated?api_key={TMDB_API_KEY}"
+    response = requests.get(url)
+    if response.status_code == 200:
+        return response.json().get("results", [])
+    return None
+
+def fetch_upcoming():
+    url = f"{BASE_URL}/movie/upcoming?api_key={TMDB_API_KEY}&language=en-US&page=1"
+    try:
+        response = requests.get(url)
+        response.raise_for_status()  # raises HTTPError for 4xx/5xx
+        return response.json().get("results", [])
+    except requests.exceptions.RequestException as e:
+        print(f"TMDB Upcoming fetch failed: {e}")
+        return []

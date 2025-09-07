@@ -9,6 +9,7 @@ class WelcomeView(APIView):
         return Response({
             'message': 'Welcome to Movie Recommendation API',
             'endpoints': {
+                'admin/':'admin.site.urls',
                 'api_docs': '/api/docs/',
                 'admin': '/admin/',
                 'api_auth': '/api/auth/',

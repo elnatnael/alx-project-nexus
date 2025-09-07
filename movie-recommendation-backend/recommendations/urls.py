@@ -1,7 +1,12 @@
 from django.urls import path
-from .views import PersonalizedRecommendationsView, TrackInteractionView
+from .views import (
+    UserBasedRecommendationsView,
+    MovieBasedRecommendationsView,
+    TrendingRecommendationsView,
+)
 
 urlpatterns = [
-    path('personalized/', PersonalizedRecommendationsView.as_view(), name='personalized-recommendations'),
-    path('interactions/', TrackInteractionView.as_view(), name='track-interaction'),
+    path("user/", UserBasedRecommendationsView.as_view(), name="user-recommendations"),
+    path("movie/<int:movie_id>/", MovieBasedRecommendationsView.as_view(), name="movie-recommendations"),
+    path("trending/", TrendingRecommendationsView.as_view(), name="trending-recommendations"),
 ]
